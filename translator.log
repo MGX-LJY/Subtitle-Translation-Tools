@@ -7551,3 +7551,5 @@ RuntimeError: Event loop is closed
 [2025-07-19 00:03:22,482] INFO - HTTP Request: POST https://jeniya.cn/v1/chat/completions "HTTP/1.1 200 OK"
 [2025-07-19 00:03:22,944] INFO - HTTP Request: POST https://jeniya.cn/v1/chat/completions "HTTP/1.1 200 OK"
 [2025-07-19 00:03:24,822] INFO - HTTP Request: POST https://jeniya.cn/v1/chat/completions "HTTP/1.1 200 OK"
+[2025-07-19 00:26:04,533] INFO - 配置已保存到 /Users/martinezdavid/Documents/MG/code/Subtitle Translation Tools/main.config.json
+[2025-07-19 00:26:24,109] INFO - Config loaded from /Users/martinezdavid/Documents/MG/code/Subtitle Translation Tools/main.config.json

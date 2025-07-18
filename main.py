@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-AI SRT Translator v1.8  (2025‑07)
----------------------------------
+AI SRT Translator v1.8  (2025‑07, persistent config edition)
+------------------------------------------------------------
 • 并发 8 通道，但结果按行顺序 *即时* 刷新
 • 语气词规则再加: “晚安” → “啊～～”
-• 导出文件名: <原名>_翻译后.srt，可自选文件夹
+• 新增：API Key / 接口地址 / 目标模型 / 目标语言 保存在同目录 <脚本名>.config.json
 """
 
-import sys, asyncio, logging, datetime
+import sys, asyncio, logging, datetime, json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple
@@ -31,7 +31,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("translator")
 
-# -------- data --------
+# -------- config persistence --------
+CONFIG_PATH = Path(__file__).with_suffix(".config.json")
+
 @dataclass
 class Config:
     api_key: str = ""
@@ -39,10 +41,41 @@ class Config:
     model: str   = "gpt-4o-mini"
     target_lang: str = "中文"
 
+def load_config() -> Config:
+    cfg = Config()
+    if CONFIG_PATH.exists():
+        try:
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            cfg.api_key     = data.get("api_key", "")
+            cfg.base_url    = data.get("base_url", "")
+            cfg.model       = data.get("model", cfg.model)
+            cfg.target_lang = data.get("target_lang", cfg.target_lang)
+            log.info(f"Config loaded from {CONFIG_PATH}")
+        except Exception as e:
+            log.warning(f"读取配置失败: {e}")
+    return cfg
+
+def save_config(cfg: Config):
+    data = {
+        "api_key": cfg.api_key,
+        "base_url": cfg.base_url,
+        "model": cfg.model,
+        "target_lang": cfg.target_lang,
+    }
+    try:
+        CONFIG_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+        log.info(f"配置已保存到 {CONFIG_PATH}")
+    except Exception as e:
+        log.error(f"写入配置失败: {e}")
+
+# -------- data --------
 @dataclass
 class SubtitleCue:
     index:int; start:str; end:str; original:str
-    translation:str=""; fixed_text:str=""
+    translation:str="""""""""; fixed_text:str="""
 
 # -------- srt I/O --------
 def parse_srt(path:Path)->List[SubtitleCue]:
@@ -79,7 +112,6 @@ class TranslateWorker(QThread):
             "②若原句仅含单字“啊”→输出“啊～”；③其余正常翻译；只输出翻译文本，禁止附带说明。"
         )
 
-
         self.prompt_fix = (
             "你是一名具有 10 年以上经验的合法商业 AV 字幕润色助手。"
             "在绝不改变原意的前提下，请修正病句、口语化表达和多余重复，使语句更贴合 AV 场景的自然对白。\n"
@@ -92,30 +124,27 @@ class TranslateWorker(QThread):
     @staticmethod
     def _extract(resp):
         """
-        统一解析不同 SDK / 网关返回，避免 content 为 None 时触发
-        AttributeError: 'NoneType' object has no attribute 'strip'
+        统一解析不同 SDK / 网关返回
         """
-        # ── openai>=1.0 (对象) ───────────────────────────────
         if hasattr(resp, "choices"):
             content = resp.choices[0].message.content or ""
             return content.strip(), resp.usage.prompt_tokens, resp.usage.completion_tokens
 
-        # ── openai 0.x (dict) ──────────────────────────────
         if isinstance(resp, dict) and "choices" in resp:
             usage    = resp.get("usage", {})
             message  = resp["choices"][0].get("message", {})
             content  = (message.get("content") if isinstance(message, dict) else message) or ""
             return content.strip(), usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
 
-        # ── 其它 / 代理平台直接字符串 ───────────────────────
         text = str(resp or "").strip()
         if text.lower().startswith("<!doctype") or "<html" in text.lower():
             raise ValueError("收到 HTML — base_url 或 Token 可能配置错误")
         return text, 0, 0
+
     # --- thread entry ---
     def run(self):
         try:
-            asyncio.run(self._main())          # ★ 这里仍然调用 _main
+            asyncio.run(self._main())
         except Exception as e:
             self.error.emit(str(e))
 
@@ -128,11 +157,9 @@ class TranslateWorker(QThread):
         sem = asyncio.Semaphore(self.MAX_CONCURRENCY)
         total = len(self.cues)
 
-        # ---- 内部协程：真正的处理单元 ----
         async def handle(idx: int, cue: SubtitleCue):
             async with sem:
                 try:
-                    # --- ① 翻译模式 ---
                     if self.mode == "translate":
                         rsp = await client.chat.completions.create(
                             model=self.cfg.model,
@@ -148,10 +175,8 @@ class TranslateWorker(QThread):
                         cue.translation = txt
                         cue.fixed_text = ""
 
-                    # --- ② 修复模式 ---
                     else:
                         source = cue.translation or cue.original
-                        # 遇到拒绝性文本 → 保守直译
                         if any(bad in source for bad in ("无法翻译", "【违规内容")):
                             fallback_prompt = (
                                 self.prompt_translate.format(
@@ -173,7 +198,6 @@ class TranslateWorker(QThread):
                             cue.translation = txt
                             cue.fixed_text = ""
                         else:
-                            # 正常润色
                             rsp = await client.chat.completions.create(
                                 model=self.cfg.model,
                                 messages=[
@@ -186,14 +210,12 @@ class TranslateWorker(QThread):
                             txt, pt, ct = self._extract(rsp)
                             cue.fixed_text = txt
 
-                    # --- ③ 通用：Token & 回传 ---
                     self.token_inc.emit(pt, ct)
                     return (idx, True, "")
 
                 except Exception as e:
                     return (idx, False, str(e))
 
-        # ---- 并发调度 & 进度回写 ----
         tasks = [handle(i, c) for i, c in enumerate(self.cues)]
         done_cnt = 0
         for coro in asyncio.as_completed(tasks):
@@ -212,12 +234,16 @@ class TranslateWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.cfg=Config(); self.cues:List[SubtitleCue]=[]; self.history=[]; self.current_file:Path|None=None
+        self.cfg = load_config()  # ★ 读配置
+        self.cues:List[SubtitleCue]=[]
+        self.history=[]
+        self.current_file:Path|None=None
         self._ptok=self._ctok=0
         self._ui()
-    # ui
+
     def _ui(self):
-        self.setWindowTitle("AI 字幕翻译器"); self.resize(1120,650)
+        self.setWindowTitle("AI 字幕翻译器")
+        self.resize(1120,650)
         QApplication.setStyle("Fusion")
         QApplication.instance().setStyleSheet(
             "QPushButton{border:1px solid #ccc;border-radius:6px;padding:4px 10px;background:#fafafa;}"
@@ -241,6 +267,7 @@ class MainWindow(QMainWindow):
         self.token_lbl=QLabel("Tokens P:0 | C:0"); self.status.addPermanentWidget(self.token_lbl)
         lay=QVBoxLayout(); lay.addWidget(self.table); lay.addWidget(self.progress)
         cw=QWidget(); cw.setLayout(lay); self.setCentralWidget(cw)
+
     # table helpers
     def _refresh(self):
         self.table.setRowCount(len(self.cues))
@@ -255,11 +282,16 @@ class MainWindow(QMainWindow):
             btn=QPushButton("恢复"); btn.clicked.connect(lambda _,r=row:self._restore(r))
             self.table.setCellWidget(row,6,btn)
         else: self.table.setCellWidget(row,6,QWidget())
-    def _restore(self,row): self.cues[row].translation=""; self.cues[row].fixed_text=""; self._set_row(row,"","")
+    def _restore(self,row):
+        self.cues[row].translation=""; self.cues[row].fixed_text=""; self._set_row(row,"","")
     # file ops
     def open_file(self):
         fn,_=QFileDialog.getOpenFileName(self,"选择 SRT","","SRT (*.srt)")
-        if fn: self.current_file=Path(fn); self.cues=parse_srt(self.current_file); self._refresh(); self.history.clear()
+        if fn:
+            self.current_file=Path(fn);
+            self.cues=parse_srt(self.current_file);
+            self._refresh();
+            self.history.clear()
     def save_file(self):
         fn,_=QFileDialog.getSaveFileName(self,"保存为","translated.srt","SRT (*.srt)")
         if fn: write_srt(Path(fn),self.cues)
@@ -298,7 +330,7 @@ class MainWindow(QMainWindow):
         if not self.cfg.api_key: QMessageBox.warning(self,"提示","请在设置里输入 API Key"); return False
         return True
 
-# settings dialog (同 v1.7 略)
+# settings dialog
 class SettingsDialog(QDialog):
     _MODELS=["gpt-4o-mini","gpt-4o","gpt-4o-128k","gpt-3.5-turbo","gpt-3.5-turbo-16k"]
     _LANGS=["中文","English","日本語","Español","Français","Deutsch"]
@@ -315,11 +347,16 @@ class SettingsDialog(QDialog):
         ok.clicked.connect(self.accept); ca.clicked.connect(self.reject)
         hb=QHBoxLayout(); hb.addStretch(); hb.addWidget(ok); hb.addWidget(ca); lay.addLayout(hb)
     def accept(self):
-        self.cfg.api_key=self.api.text().strip(); self.cfg.base_url=self.url.text().strip()
-        self.cfg.model=self.model.currentText(); self.cfg.target_lang=self.lang.currentText()
+        self.cfg.api_key=self.api.text().strip()
+        self.cfg.base_url=self.url.text().strip()
+        self.cfg.model=self.model.currentText()
+        self.cfg.target_lang=self.lang.currentText()
+        save_config(self.cfg)            # ★ 保存配置
         super().accept()
 
 # ---- main ----
 def main():
     app=QApplication(sys.argv); win=MainWindow(); win.show(); sys.exit(app.exec())
-if __name__=="__main__": main()
+
+if __name__=="__main__":
+    main()
