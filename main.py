@@ -125,67 +125,99 @@ class TranslateWorker(QThread):
         return text, 0, 0
     # --- thread entry ---
     def run(self):
-        try: asyncio.run(self._main())
-        except Exception as e: self.error.emit(str(e))
+        try:
+            asyncio.run(self._main())          # ★ 这里仍然调用 _main
+        except Exception as e:
+            self.error.emit(str(e))
 
-    async def handle(idx: int, cue: SubtitleCue):
-        async with sem:
-            try:
-                if self.mode == "translate":
-                    # === 原始翻译逻辑（保持不变） =========================
-                    rsp = await client.chat.completions.create(
-                        model=self.cfg.model,
-                        messages=[
-                            {"role": "system",
-                             "content": self.prompt_translate.format(lang=self.cfg.target_lang)},
-                            {"role": "user", "content": cue.original}
-                        ],
-                        timeout=25
-                    )
-                    txt, pt, ct = self._extract(rsp)
-                    cue.translation = txt
-                    cue.fixed_text = ""
+    # -------- 核心异步逻辑 --------
+    async def _main(self):
+        client = AsyncOpenAI(
+            api_key=self.cfg.api_key,
+            base_url=self.cfg.base_url or None
+        )
+        sem = asyncio.Semaphore(self.MAX_CONCURRENCY)
+        total = len(self.cues)
 
-                else:  # ----------------- fix 模式 -----------------------
-                    source = cue.translation or cue.original
-
-                    # ---------- 新增：拒绝/违规检测 & 保守回译 ----------
-                    if any(bad in source for bad in ("无法翻译", "【违规内容")):
-                        fallback_prompt = (
-                                self.prompt_translate.format(lang=self.cfg.target_lang)
-                                + "\n【额外指令】请保持直译风格，避免润色和主观扩写；若出现敏感内容请用 ♪♪ 占位。"
-                        )
+        # ---- 内部协程：真正的处理单元 ----
+        async def handle(idx: int, cue: SubtitleCue):
+            async with sem:
+                try:
+                    # --- ① 翻译模式 ---
+                    if self.mode == "translate":
                         rsp = await client.chat.completions.create(
                             model=self.cfg.model,
                             messages=[
-                                {"role": "system", "content": fallback_prompt},
+                                {"role": "system",
+                                 "content": self.prompt_translate.format(
+                                     lang=self.cfg.target_lang)},
                                 {"role": "user", "content": cue.original}
                             ],
                             timeout=25
                         )
                         txt, pt, ct = self._extract(rsp)
-                        cue.translation = txt  # 覆盖原 translation
-                        cue.fixed_text = ""  # 放弃润色
+                        cue.translation = txt
+                        cue.fixed_text = ""
+
+                    # --- ② 修复模式 ---
                     else:
-                        # ---------- 原有润色流程 ----------
-                        rsp = await client.chat.completions.create(
-                            model=self.cfg.model,
-                            messages=[
-                                {"role": "system", "content": self.prompt_fix},
-                                {"role": "user", "content": source}
-                            ],
-                            timeout=25
-                        )
-                        txt, pt, ct = self._extract(rsp)
-                        cue.fixed_text = txt  # 正常写入 fixed_text
+                        source = cue.translation or cue.original
+                        # 遇到拒绝性文本 → 保守直译
+                        if any(bad in source for bad in ("无法翻译", "【违规内容")):
+                            fallback_prompt = (
+                                self.prompt_translate.format(
+                                    lang=self.cfg.target_lang)
+                                + "\n【额外指令】请保持直译风格，避免润色和主观扩写；"
+                                  "若出现敏感内容请用 ♪♪ 占位。"
+                            )
+                            rsp = await client.chat.completions.create(
+                                model=self.cfg.model,
+                                messages=[
+                                    {"role": "system",
+                                     "content": fallback_prompt},
+                                    {"role": "user",
+                                     "content": cue.original}
+                                ],
+                                timeout=25
+                            )
+                            txt, pt, ct = self._extract(rsp)
+                            cue.translation = txt
+                            cue.fixed_text = ""
+                        else:
+                            # 正常润色
+                            rsp = await client.chat.completions.create(
+                                model=self.cfg.model,
+                                messages=[
+                                    {"role": "system",
+                                     "content": self.prompt_fix},
+                                    {"role": "user", "content": source}
+                                ],
+                                timeout=25
+                            )
+                            txt, pt, ct = self._extract(rsp)
+                            cue.fixed_text = txt
 
-                # --------- 共用：Token 统计 & 回传 ------------------------
-                self.token_inc.emit(pt, ct)
-                return (idx, True, "")
+                    # --- ③ 通用：Token & 回传 ---
+                    self.token_inc.emit(pt, ct)
+                    return (idx, True, "")
 
-            except Exception as e:
-                return (idx, False, str(e))
+                except Exception as e:
+                    return (idx, False, str(e))
 
+        # ---- 并发调度 & 进度回写 ----
+        tasks = [handle(i, c) for i, c in enumerate(self.cues)]
+        done_cnt = 0
+        for coro in asyncio.as_completed(tasks):
+            idx, ok, err = await coro
+            if not ok:
+                self.error.emit(err)
+                return
+            cue = self.cues[idx]
+            self.update_row.emit(idx, cue.translation, cue.fixed_text)
+            done_cnt += 1
+            self.progress.emit(done_cnt, total)
+
+        self.finished.emit(self.mode)
 
 # -------- main window --------
 class MainWindow(QMainWindow):
