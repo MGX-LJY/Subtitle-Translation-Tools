@@ -1,0 +1,48 @@
+{
+  "project_analysis": {
+    "project_type": "python",
+    "main_framework": "gin",
+    "identified_modules": [],
+    "code_complexity": "simple",
+    "file_count": 1,
+    "key_files": [
+      "main.py"
+    ],
+    "file_distribution": {
+      ".py": 1
+    },
+    "directory_structure": []
+  },
+  "documentation_strategy": {
+    "execution_phases": [
+      "files_first",
+      "architecture_second",
+      "project_last"
+    ],
+    "priority_strategy": "sequential",
+    "priority_files": [
+      "main.py"
+    ],
+    "estimated_templates": 11,
+    "complexity_level": "simple"
+  },
+  "generation_plan": {
+    "phase_1_files": [
+      "main.py"
+    ],
+    "phase_2_architecture": [
+      "system_overview",
+      "tech_stack",
+      "data_flow",
+      "deployment_architecture",
+      "package_structure",
+      "dependency_management"
+    ],
+    "phase_3_project": [
+      "project_readme"
+    ],
+    "estimated_duration": "1 hours 33 minutes"
+  },
+  "timestamp": 1758461670.137939,
+  "version": "1.0"
+}

@@ -1,377 +1,43 @@
 # -*- coding: utf-8 -*-
 """
-AI SRT Translator v1.8  (2025‑07, persistent config edition)
-------------------------------------------------------------
-• 并发 8 通道，但结果按行顺序 *即时* 刷新
-• 语气词规则再加: “晚安” → “啊～～”
-• 新增：API Key / 接口地址 / 目标模型 / 目标语言 保存在同目录 <脚本名>.config.json
+AI 字幕翻译器 - 模块化版本入口文件
 """
 
-import sys, asyncio, logging, datetime, json
-from dataclasses import dataclass
+import sys
 from pathlib import Path
-from typing import List, Tuple
 
-from openai import AsyncOpenAI
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QFileDialog, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QProgressBar, QToolBar, QStatusBar, QMessageBox,
-    QDialog, QComboBox, QHeaderView
-)
-from PySide6.QtGui import QAction
+# 添加项目根目录到Python路径
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
 
-# -------- logging --------
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout),
-              logging.FileHandler("translator.log", encoding="utf-8")]
-)
-log = logging.getLogger("translator")
+from PySide6.QtWidgets import QApplication
+from ui import MainWindow
+from utils import setup_logging, get_logger
 
-# -------- config persistence --------
-CONFIG_PATH = Path(__file__).with_suffix(".config.json")
-
-@dataclass
-class Config:
-    api_key: str = ""
-    base_url: str = ""
-    model: str   = "gpt-4o-mini"
-    target_lang: str = "中文"
-
-def load_config() -> Config:
-    cfg = Config()
-    if CONFIG_PATH.exists():
-        try:
-            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            cfg.api_key     = data.get("api_key", "")
-            cfg.base_url    = data.get("base_url", "")
-            cfg.model       = data.get("model", cfg.model)
-            cfg.target_lang = data.get("target_lang", cfg.target_lang)
-            log.info(f"Config loaded from {CONFIG_PATH}")
-        except Exception as e:
-            log.warning(f"读取配置失败: {e}")
-    return cfg
-
-def save_config(cfg: Config):
-    data = {
-        "api_key": cfg.api_key,
-        "base_url": cfg.base_url,
-        "model": cfg.model,
-        "target_lang": cfg.target_lang,
-    }
-    try:
-        CONFIG_PATH.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
-        log.info(f"配置已保存到 {CONFIG_PATH}")
-    except Exception as e:
-        log.error(f"写入配置失败: {e}")
-
-# -------- data --------
-@dataclass
-class SubtitleCue:
-    index: int
-    start: str
-    end: str
-    original: str
-    translation: str = ""    # ★ 必须有
-    fixed_text: str = ""     # ★ 必须有
+# 设置日志
+setup_logging()
+logger = get_logger(__name__)
 
 
-# -------- srt I/O --------
-def parse_srt(path:Path)->List[SubtitleCue]:
-    cues,blk=[],[]
-    with path.open("r",encoding="utf-8",errors="ignore") as f:
-        for ln in f:
-            if ln.strip(): blk.append(ln.rstrip("\n"))
-            else: _blk_to_cue(blk,cues); blk=[]
-        _blk_to_cue(blk,cues)
-    return cues
-def _blk_to_cue(blk,cues):
-    if len(blk)>=3:
-        idx=int(blk[0]); s,_,e=blk[1].partition(" --> ")
-        cues.append(SubtitleCue(idx,s,e,"\n".join(blk[2:])))
-def write_srt(path:Path,cues:List[SubtitleCue]):
-    with path.open("w",encoding="utf-8") as f:
-        for c in cues:
-            txt=c.fixed_text or c.translation or c.original
-            f.write(f"{c.index}\n{c.start} --> {c.end}\n{txt}\n\n")
-
-# -------- worker --------
-class TranslateWorker(QThread):
-    update_row = Signal(int,str,str)
-    token_inc  = Signal(int,int)
-    progress   = Signal(int,int)
-    finished   = Signal(str)
-    error      = Signal(str)
-    MAX_CONCURRENCY=8
-    def __init__(self,cues:List[SubtitleCue],cfg:Config,mode:str):
-        super().__init__(); self.cues=cues; self.cfg=cfg; self.mode=mode
-        self.prompt_translate = (
-            # 角色设定
-            "你是一名拥有 10 年以上经验、持证且合法合规的商业成人影片（日 → {lang}）字幕译者。\n"
-            "【合规保证】用户确认：原文不涉及未成年人、非自愿或其他违法情节，且已合法授权翻译。\n"
-            "【翻译任务】将用户提供的字幕句子翻译成 {lang}，保持口语自然、符合日本 AV 对白风格。\n"
-            "【翻译规则】\n"
-            "1. 保留角色称呼与口头禅（如「哥哥」「学姐」「あっ」「んっ」），以符合 {lang} 读者习惯的口语呈现。\n"
-            "2. 对不易直译的俚语或双关语做意译，必要时用括号作极简说明。\n"
-            "3. 每条字幕最多两行，每行 ≤ 20 个全角字符。\n"
-            "4. 若整句仅为语气词 / 拟声词 /『晚安』，输出「啊～～」。\n"
-            "5. 若原句仅含单字「啊」，输出「啊～」。\n"
-            "6. 听不清或缺字处用「♪♪」占位；**禁止输出『无法翻译』或任何拒绝性用语**。\n"
-            "7. 其余情况正常翻译，不得增删原意。\n"
-            "8. 仅输出翻译文本，不附带任何解释。\n"
-        )
-
-        self.prompt_fix = (
-            "你是一名具有 10 年以上经验的合法商业 AV 字幕润色助手。"
-            "在绝不改变原意的前提下，请修正病句、口语化表达和多余重复，使语句更贴合 AV 场景的自然对白。\n"
-            "请遵循以下规则：\n"
-            "1. 若原句已自然流畅且符合场景，请原样输出；\n"
-            "2. 若需润色，仅输出润色后的字幕文本，不得附带任何解释或标注。"
-        )
-
-    # --- extract ---
-    @staticmethod
-    def _extract(resp):
-        """
-        统一解析不同 SDK / 网关返回
-        """
-        if hasattr(resp, "choices"):
-            content = resp.choices[0].message.content or ""
-            return content.strip(), resp.usage.prompt_tokens, resp.usage.completion_tokens
-
-        if isinstance(resp, dict) and "choices" in resp:
-            usage    = resp.get("usage", {})
-            message  = resp["choices"][0].get("message", {})
-            content  = (message.get("content") if isinstance(message, dict) else message) or ""
-            return content.strip(), usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
-
-        text = str(resp or "").strip()
-        if text.lower().startswith("<!doctype") or "<html" in text.lower():
-            raise ValueError("收到 HTML — base_url 或 Token 可能配置错误")
-        return text, 0, 0
-
-    # --- thread entry ---
-    def run(self):
-        try:
-            asyncio.run(self._main())
-        except Exception as e:
-            self.error.emit(str(e))
-
-    # -------- 核心异步逻辑 --------
-    async def _main(self):
-        client = AsyncOpenAI(
-            api_key=self.cfg.api_key,
-            base_url=self.cfg.base_url or None
-        )
-        sem = asyncio.Semaphore(self.MAX_CONCURRENCY)
-        total = len(self.cues)
-
-        async def handle(idx: int, cue: SubtitleCue):
-            async with sem:
-                try:
-                    if self.mode == "translate":
-                        rsp = await client.chat.completions.create(
-                            model=self.cfg.model,
-                            messages=[
-                                {"role": "system",
-                                 "content": self.prompt_translate.format(
-                                     lang=self.cfg.target_lang)},
-                                {"role": "user", "content": cue.original}
-                            ],
-                            timeout=25
-                        )
-                        txt, pt, ct = self._extract(rsp)
-                        cue.translation = txt
-                        cue.fixed_text = ""
-
-                    else:
-                        source = cue.translation or cue.original
-                        if any(bad in source for bad in ("无法翻译", "【违规内容")):
-                            fallback_prompt = (
-                                self.prompt_translate.format(
-                                    lang=self.cfg.target_lang)
-                                + "\n【额外指令】请保持直译风格，避免润色和主观扩写；"
-                                  "若出现敏感内容请用 ♪♪ 占位。"
-                            )
-                            rsp = await client.chat.completions.create(
-                                model=self.cfg.model,
-                                messages=[
-                                    {"role": "system",
-                                     "content": fallback_prompt},
-                                    {"role": "user",
-                                     "content": cue.original}
-                                ],
-                                timeout=25
-                            )
-                            txt, pt, ct = self._extract(rsp)
-                            cue.translation = txt
-                            cue.fixed_text = ""
-                        else:
-                            rsp = await client.chat.completions.create(
-                                model=self.cfg.model,
-                                messages=[
-                                    {"role": "system",
-                                     "content": self.prompt_fix},
-                                    {"role": "user", "content": source}
-                                ],
-                                timeout=25
-                            )
-                            txt, pt, ct = self._extract(rsp)
-                            cue.fixed_text = txt
-
-                    self.token_inc.emit(pt, ct)
-                    return (idx, True, "")
-
-                except Exception as e:
-                    return (idx, False, str(e))
-
-        tasks = [handle(i, c) for i, c in enumerate(self.cues)]
-        done_cnt = 0
-        for coro in asyncio.as_completed(tasks):
-            idx, ok, err = await coro
-            if not ok:
-                self.error.emit(err)
-                return
-            cue = self.cues[idx]
-            self.update_row.emit(idx, cue.translation, cue.fixed_text)
-            done_cnt += 1
-            self.progress.emit(done_cnt, total)
-
-        self.finished.emit(self.mode)
-
-# -------- main window --------
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.cfg = load_config()  # ★ 读配置
-        self.cues:List[SubtitleCue]=[]
-        self.history=[]
-        self.current_file:Path|None=None
-        self._ptok=self._ctok=0
-        self._ui()
-
-    def _ui(self):
-        self.setWindowTitle("AI 字幕翻译器")
-        self.resize(1120,650)
-        QApplication.setStyle("Fusion")
-        QApplication.instance().setStyleSheet(
-            "QPushButton{border:1px solid #ccc;border-radius:6px;padding:4px 10px;background:#fafafa;}"
-            "QPushButton:hover{background:#e6f2ff;} QToolBar{spacing:4px;}"
-            "QToolButton{margin:2px;padding:4px 8px;border-radius:6px;} QToolButton:hover{background:#e6f2ff;}"
-        )
-        tb=QToolBar(); tb.setMovable(False); self.addToolBar(tb)
-        for t,cb in (("打开",self.open_file),("保存",self.save_file),("导出",self.export_file),
-                     (None,None),("全部翻译",self.translate_all),("全部修复",self.fix_all),
-                     ("撤销",self.undo),("设置",self.open_settings)):
-            tb.addSeparator() if t is None else tb.addAction(QAction(t,self,triggered=cb))
-        self.table=QTableWidget(0,7)
-        self.table.setHorizontalHeaderLabels(["#","开始","结束","原文","译文","修复后","恢复"])
-        hdr=self.table.horizontalHeader()
-        for i in (0,1,2,6): hdr.setSectionResizeMode(i,QHeaderView.ResizeToContents)
-        for i in (3,4,5): hdr.setSectionResizeMode(i,QHeaderView.Stretch)
-        self.table.setWordWrap(True); self.table.setAlternatingRowColors(True)
-        self.table.setEditTriggers(QTableWidget.DoubleClicked|QTableWidget.EditKeyPressed)
-        self.progress=QProgressBar(); self.progress.setFixedHeight(18)
-        self.status=QStatusBar(); self.setStatusBar(self.status)
-        self.token_lbl=QLabel("Tokens P:0 | C:0"); self.status.addPermanentWidget(self.token_lbl)
-        lay=QVBoxLayout(); lay.addWidget(self.table); lay.addWidget(self.progress)
-        cw=QWidget(); cw.setLayout(lay); self.setCentralWidget(cw)
-
-    # table helpers
-    def _refresh(self):
-        self.table.setRowCount(len(self.cues))
-        for r,c in enumerate(self.cues): self._set_row(r,c.translation,c.fixed_text)
-    def _set_row(self,row,t,f):
-        cue=self.cues[row]; cue.translation=t; cue.fixed_text=f
-        vals=(cue.index,cue.start,cue.end,cue.original,cue.translation,cue.fixed_text,"")
-        for col,val in enumerate(vals):
-            item=QTableWidgetItem(str(val)); item.setTextAlignment(Qt.AlignLeft|Qt.AlignTop)
-            item.setFlags(item.flags()|Qt.ItemIsEditable); self.table.setItem(row,col,item)
-        if cue.translation or cue.fixed_text:
-            btn=QPushButton("恢复"); btn.clicked.connect(lambda _,r=row:self._restore(r))
-            self.table.setCellWidget(row,6,btn)
-        else: self.table.setCellWidget(row,6,QWidget())
-    def _restore(self,row):
-        self.cues[row].translation=""; self.cues[row].fixed_text=""; self._set_row(row,"","")
-    # file ops
-    def open_file(self):
-        fn,_=QFileDialog.getOpenFileName(self,"选择 SRT","","SRT (*.srt)")
-        if fn:
-            self.current_file=Path(fn);
-            self.cues=parse_srt(self.current_file);
-            self._refresh();
-            self.history.clear()
-    def save_file(self):
-        fn,_=QFileDialog.getSaveFileName(self,"保存为","translated.srt","SRT (*.srt)")
-        if fn: write_srt(Path(fn),self.cues)
-    def export_file(self):
-        if not self.cues: return
-        dest_dir=QFileDialog.getExistingDirectory(self,"选择导出文件夹")
-        if not dest_dir: return
-        name="translated"
-        if self.current_file: name=self.current_file.stem+"_翻译后"
-        out=Path(dest_dir)/f"{name}.srt"; write_srt(out,self.cues); self.status.showMessage(f"已导出 {out}")
-    # llm launch
-    def translate_all(self): self._run("translate")
-    def fix_all(self):       self._run("fix")
-    def _run(self,mode):
-        if not self._ready(): return
-        self._ptok=self._ctok=0; self._update_tok()
-        self.progress.setValue(0); self.progress.setMaximum(len(self.cues))
-        self._push_hist()
-        w=TranslateWorker(self.cues.copy(),self.cfg,mode)
-        w.update_row.connect(self._set_row); w.token_inc.connect(lambda p,c:self._add_tok(p,c))
-        w.progress.connect(lambda d,total:self.progress.setValue(d))
-        w.error.connect(lambda m: QMessageBox.critical(self,"错误",m))
-        w.finished.connect(lambda _: self.status.showMessage("全部完成！"))
-        w.start(); self.status.showMessage("任务进行中…"); self.worker=w
-    def _add_tok(self,p,c): self._ptok+=p; self._ctok+=c; self._update_tok()
-    def _update_tok(self): self.token_lbl.setText(f"Tokens P:{self._ptok} | C:{self._ctok}")
-    # hist / undo
-    def _push_hist(self): self.history.append([SubtitleCue(**vars(c)) for c in self.cues])
-    def undo(self):
-        if self.history: self.cues=self.history.pop(); self._refresh()
-    # settings
-    def open_settings(self): SettingsDialog(self.cfg,self).exec()
-    # util
-    def _ready(self):
-        if not self.cues: QMessageBox.warning(self,"提示","请先加载 SRT"); return False
-        if not self.cfg.api_key: QMessageBox.warning(self,"提示","请在设置里输入 API Key"); return False
-        return True
-
-# settings dialog
-class SettingsDialog(QDialog):
-    _MODELS=["gpt-4o-mini","gpt-4o","gpt-4o-128k","gpt-3.5-turbo","gpt-3.5-turbo-16k"]
-    _LANGS=["中文","English","日本語","Español","Français","Deutsch"]
-    def __init__(self,cfg:Config,parent=None):
-        super().__init__(parent); self.cfg=cfg; self.setWindowTitle("设置"); self.resize(400,240)
-        self.api=QLineEdit(cfg.api_key); self.url=QLineEdit(cfg.base_url)
-        self.model=QComboBox(); self.model.addItems(self._MODELS); self.model.setCurrentText(cfg.model)
-        self.lang=QComboBox();  self.lang.addItems(self._LANGS);  self.lang.setCurrentText(cfg.target_lang)
-        lay=QVBoxLayout(self)
-        for lbl,w in (("API Key",self.api),("接口地址(含 /v1)",self.url),
-                      ("模型",self.model),("目标语言",self.lang)):
-            lay.addWidget(QLabel(lbl)); lay.addWidget(w)
-        ok=QPushButton("保存"); ca=QPushButton("取消")
-        ok.clicked.connect(self.accept); ca.clicked.connect(self.reject)
-        hb=QHBoxLayout(); hb.addStretch(); hb.addWidget(ok); hb.addWidget(ca); lay.addLayout(hb)
-    def accept(self):
-        self.cfg.api_key=self.api.text().strip()
-        self.cfg.base_url=self.url.text().strip()
-        self.cfg.model=self.model.currentText()
-        self.cfg.target_lang=self.lang.currentText()
-        save_config(self.cfg)            # ★ 保存配置
-        super().accept()
-
-# ---- main ----
 def main():
-    app=QApplication(sys.argv); win=MainWindow(); win.show(); sys.exit(app.exec())
+    """应用程序主入口"""
+    try:
+        # 创建应用程序
+        app = QApplication(sys.argv)
+        
+        # 创建主窗口
+        window = MainWindow()
+        window.show()
+        
+        logger.info("应用程序启动成功")
+        
+        # 运行应用程序
+        return app.exec()
+        
+    except Exception as e:
+        logger.error(f"应用程序启动失败: {e}")
+        return 1
 
-if __name__=="__main__":
-    main()
+
+if __name__ == "__main__":
+    sys.exit(main())
