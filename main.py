@@ -5,6 +5,7 @@ AI SRT Translator v1.8  (2025‑07, persistent config edition)
 • 并发 8 通道，但结果按行顺序 *即时* 刷新
 • 语气词规则再加: “晚安” → “啊～～”
 • 新增：API Key / 接口地址 / 目标模型 / 目标语言 保存在同目录 <脚本名>.config.json
+
 """
 
 import sys, asyncio, logging, datetime, json
