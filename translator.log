@@ -1,0 +1,12 @@
+[2026-06-03 11:43:52,532] INFO - HTTP Request: GET http://testserver/ "HTTP/1.1 200 OK"
+[2026-06-03 11:43:52,534] INFO - HTTP Request: GET http://testserver/api/config "HTTP/1.1 200 OK"
+[2026-06-03 11:43:52,536] INFO - HTTP Request: POST http://testserver/api/upload "HTTP/1.1 200 OK"
+[2026-06-03 11:43:52,537] INFO - HTTP Request: POST http://testserver/api/cues/0 "HTTP/1.1 200 OK"
+[2026-06-03 11:44:12,910] INFO - HTTP Request: POST http://testserver/api/upload "HTTP/1.1 200 OK"
+[2026-06-03 11:44:12,912] INFO - HTTP Request: POST http://testserver/api/cues/0 "HTTP/1.1 200 OK"
+[2026-06-03 11:44:12,914] INFO - HTTP Request: GET http://testserver/api/export "HTTP/1.1 200 OK"
+[2026-06-03 11:44:12,916] INFO - HTTP Request: POST http://testserver/api/undo "HTTP/1.1 200 OK"
+[2026-06-03 11:44:24,486] INFO - HTTP Request: POST http://testserver/api/upload "HTTP/1.1 200 OK"
+[2026-06-03 11:45:37,144] INFO - 启动网页服务: http://127.0.0.1:8000
+[2026-06-03 11:49:31,290] INFO - HTTP Request: GET http://testserver/ "HTTP/1.1 200 OK"
+[2026-06-03 11:49:31,292] INFO - HTTP Request: GET http://testserver/ "HTTP/1.1 200 OK"
