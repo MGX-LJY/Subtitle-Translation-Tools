@@ -1,1 +1,6 @@
 /dist/
+__pycache__/
+/media_tmp/
+/work_tmp/
+config.json
+translator.log

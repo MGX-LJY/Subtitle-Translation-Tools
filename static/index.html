@@ -71,6 +71,22 @@
   .toolbar{display:flex; align-items:center; gap:9px; padding:14px 22px 0;}
   .toolbar .divider{width:1px; height:22px; background:var(--line); margin:0 3px;}
 
+  /* ---------- Status line (运行阶段常驻提示) ---------- */
+  .status{
+    display:inline-flex; align-items:center; gap:9px; margin-left:auto;
+    padding:6px 13px; background:var(--accent-soft); border-radius:999px;
+    font-size:12.5px; color:#4a3fd6; white-space:nowrap; max-width:46%;
+  }
+  .status .txt{overflow:hidden; text-overflow:ellipsis;}
+  .status b{font-weight:700; font-variant-numeric:tabular-nums; flex:none;}
+  .status .elapsed{color:#8b7dff; font-variant-numeric:tabular-nums; flex:none;}
+  .spin{
+    width:13px; height:13px; flex:none; border-radius:50%;
+    border:2px solid rgba(109,94,252,.25); border-top-color:var(--accent);
+    animation:spin .8s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+
   /* ---------- Progress ---------- */
   .progress-rail{height:3px; background:transparent; margin:14px 22px 0; border-radius:3px; overflow:hidden;}
   .progress-rail.active{background:var(--line);}
@@ -102,7 +118,7 @@
   tbody tr:hover{background:#fafaff;}
   .col-idx{width:54px; color:var(--muted); font-variant-numeric:tabular-nums;}
   .col-time{width:104px; color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums;}
-  .col-act{width:64px;}
+  .col-act{width:86px;}
   td.edit{cursor:text; border-radius:6px;}
   td.edit:empty::before{content:"—"; color:#c9cdda;}
   td.edit:focus{outline:2px solid var(--accent); outline-offset:-2px; background:#fff;}
@@ -111,8 +127,10 @@
   @keyframes flash{from{background:var(--accent-soft);} to{background:transparent;}}
   tr.flash{animation:flash 1s ease;}
   .mini{
+    display:inline-flex; align-items:center; justify-content:center;
     border:1px solid var(--line); background:var(--panel); color:var(--muted);
-    height:26px; padding:0 9px; border-radius:7px; font-size:12px; cursor:pointer; transition:.15s;
+    height:30px; padding:0 14px; border-radius:8px; font-size:12.5px;
+    line-height:1; white-space:nowrap; cursor:pointer; transition:.15s;
   }
   .mini:hover{color:var(--danger); border-color:#f3c6cd; background:#fff5f6;}
 
@@ -193,9 +211,14 @@
   <!-- Toolbar -->
   <div class="toolbar">
     <input type="file" id="file-input" accept=".srt" hidden>
+    <input type="file" id="media-input" accept="video/*,audio/*,.mkv,.ts,.flac,.m4a,.aac,.wav,.mp3" hidden>
     <button class="btn" id="btn-open">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
       打开
+    </button>
+    <button class="btn" id="btn-transcribe" title="视频/音频 → Demucs 人声分离 → Whisper 转写为字幕">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/></svg>
+      视频转写
     </button>
     <button class="btn primary" id="btn-translate">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6M4 14l6-6 2-3M2 5h12M7 2h1M22 22l-5-10-5 10M14 18h6"/></svg>
@@ -204,6 +227,10 @@
     <button class="btn" id="btn-fix">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
       全部修复
+    </button>
+    <button class="btn" id="btn-resume" title="继续未完成的工作：只补齐译文/润色为空的行">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m10 8 6 4-6 4z"/></svg>
+      继续
     </button>
     <div class="divider"></div>
     <button class="btn" id="btn-undo">
@@ -214,6 +241,12 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>
       导出
     </button>
+    <div class="status" id="status" style="display:none">
+      <span class="spin"></span>
+      <span class="txt" id="status-text"></span>
+      <b id="status-pct"></b>
+      <span class="elapsed" id="status-elapsed"></span>
+    </div>
   </div>
 
   <!-- Progress -->
@@ -276,6 +309,40 @@
           <option>Español</option><option>Français</option><option>Deutsch</option>
         </select>
       </div>
+      <div class="field">
+        <label>并发请求数（翻译/修复）</label>
+        <input id="set-conc" type="number" min="1" max="32" step="1" placeholder="10">
+        <div class="hint">同时发出的请求数，越大越快；触发限流报错就调小</div>
+      </div>
+      <div class="field">
+        <label>Whisper 模型（本地转写）</label>
+        <select id="set-wmodel">
+          <option>large-v3</option><option>large-v2</option>
+          <option>distil-large-v3</option><option>medium</option><option>small</option>
+        </select>
+        <div class="hint">首次使用会自动从 Hugging Face 下载模型</div>
+      </div>
+      <div class="field">
+        <label>转写设备</label>
+        <select id="set-wdevice">
+          <option>auto</option><option>cuda</option><option>cpu</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>转写语言</label>
+        <select id="set-tlang">
+          <option value="ja">日语 (ja)</option><option value="">自动检测</option>
+          <option value="en">英语 (en)</option><option value="zh">中文 (zh)</option>
+          <option value="ko">韩语 (ko)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>人声分离 (Demucs)</label>
+        <select id="set-demucs">
+          <option value="1">开启 — 先提取人声再转写（推荐，背景音乐多时更准）</option>
+          <option value="0">关闭 — 直接转写原始音轨（更快）</option>
+        </select>
+      </div>
     </div>
     <footer>
       <button class="btn ghost" id="set-cancel">取消</button>
@@ -311,23 +378,18 @@ function escapeHtml(s){ return (s??'').replace(/[&<>]/g, m=>({'&':'&amp;','<':'&
 
 function refreshEmpty(){ $('empty').style.display = cues.length ? 'none' : 'flex'; }
 
-function renderTable(){
-  const tb = $('tbody'); tb.innerHTML = '';
-  cues.forEach((c,i)=>{
-    const tr = document.createElement('tr');
-    tr.dataset.idx = i;
-    tr.innerHTML = `
-      <td class="col-idx">${c.index}</td>
-      <td class="col-time">${escapeHtml(c.start)}</td>
-      <td class="col-time">${escapeHtml(c.end)}</td>
-      <td>${escapeHtml(c.original)}</td>
-      <td class="edit tr-trans" contenteditable data-field="translation">${escapeHtml(c.translation)}</td>
-      <td class="edit" contenteditable data-field="fixed_text">${escapeHtml(c.fixed_text)}</td>
-      <td class="col-act"></td>`;
-    tb.appendChild(tr);
-    syncRestore(i);
-  });
-  tb.querySelectorAll('td.edit').forEach(td=>{
+function buildRow(c, i){
+  const tr = document.createElement('tr');
+  tr.dataset.idx = i;
+  tr.innerHTML = `
+    <td class="col-idx">${c.index}</td>
+    <td class="col-time">${escapeHtml(c.start)}</td>
+    <td class="col-time">${escapeHtml(c.end)}</td>
+    <td>${escapeHtml(c.original)}</td>
+    <td class="edit tr-trans" contenteditable data-field="translation">${escapeHtml(c.translation)}</td>
+    <td class="edit" contenteditable data-field="fixed_text">${escapeHtml(c.fixed_text)}</td>
+    <td class="col-act"></td>`;
+  tr.querySelectorAll('td.edit').forEach(td=>{
     td.addEventListener('blur', async ()=>{
       const idx = +td.closest('tr').dataset.idx, field = td.dataset.field, value = td.innerText;
       if(cues[idx][field] === value) return;
@@ -336,6 +398,22 @@ function renderTable(){
       syncRestore(idx);
     });
   });
+  return tr;
+}
+
+function renderTable(){
+  const tb = $('tbody'); tb.innerHTML = '';
+  cues.forEach((c,i)=>{ tb.appendChild(buildRow(c,i)); syncRestore(i); });
+  refreshEmpty();
+}
+
+function appendCue(c){
+  cues.push(c);
+  const i = cues.length - 1;
+  const tr = buildRow(c, i);
+  $('tbody').appendChild(tr);
+  tr.classList.add('flash');
+  tr.scrollIntoView({block:'nearest'});
   refreshEmpty();
 }
 
@@ -395,26 +473,57 @@ $('btn-undo').onclick = async ()=>{
   cues = data.cues; renderTable(); toast('已撤销','info');
 };
 
+/* ---------- status line (常驻阶段提示) ---------- */
+let stageTimer = null, stageStart = 0;
+function fmtElapsed(ms){
+  const s = Math.floor(ms/1000), m = Math.floor(s/60);
+  return m ? `${m}分${String(s%60).padStart(2,'0')}秒` : `${s}秒`;
+}
+function setStage(text){
+  stageStart = Date.now();
+  $('status').style.display = 'inline-flex';
+  $('status-text').textContent = text;
+  $('status-text').title = text;
+  $('status-pct').textContent = '';
+  $('status-elapsed').textContent = '0秒';
+  if(!stageTimer) stageTimer = setInterval(()=>{
+    $('status-elapsed').textContent = fmtElapsed(Date.now() - stageStart);
+  }, 1000);
+}
+function setStagePct(s){ $('status-pct').textContent = s; }
+function clearStage(){
+  $('status').style.display = 'none';
+  if(stageTimer){ clearInterval(stageTimer); stageTimer = null; }
+}
+
 /* ---------- translate / fix ---------- */
 function setRunning(v){
   running = v;
-  ['btn-open','btn-translate','btn-fix','btn-undo','btn-export'].forEach(id=> $(id).disabled = v);
+  ['btn-open','btn-transcribe','btn-translate','btn-fix','btn-resume','btn-undo','btn-export'].forEach(id=> $(id).disabled = v);
   $('rail').classList.toggle('active', v);
-  if(!v) setTimeout(()=>{ if(!running){ $('bar').style.width='0%'; } }, 600);
+  if(!v){
+    clearStage();
+    setTimeout(()=>{ if(!running){ $('bar').style.width='0%'; } }, 600);
+  }
 }
-function runTask(mode){
+function runTask(mode, onlyMissing=false){
   if(!cues.length){ toast('请先加载 SRT','err'); return; }
   if(running) return;
   setRunning(true);
+  setStage((onlyMissing?'继续':'正在') + (mode==='translate' ? '逐句翻译…' : '逐句修复…'));
   $('tok-p').textContent='0'; $('tok-c').textContent='0';
   $('bar').style.width='0%';
   const proto = location.protocol==='https:'?'wss':'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws/translate`);
-  ws.onopen = ()=> ws.send(JSON.stringify({mode}));
+  ws.onopen = ()=> ws.send(JSON.stringify({mode, only_missing:onlyMissing}));
   ws.onmessage = ev=>{
     const m = JSON.parse(ev.data);
     if(m.type==='row') updateRow(m.idx, m.translation, m.fixed_text);
-    else if(m.type==='progress') $('bar').style.width = (m.done/m.total*100)+'%';
+    else if(m.type==='stage') setStage(m.message);
+    else if(m.type==='progress'){
+      $('bar').style.width = (m.done/m.total*100)+'%';
+      setStagePct(`${m.done}/${m.total} 行`);
+    }
     else if(m.type==='tokens'){ $('tok-p').textContent=m.ptok; $('tok-c').textContent=m.ctok; }
     else if(m.type==='error') toast(m.message,'err',5000);
     else if(m.type==='finished'){ toast(mode==='translate'?'翻译完成':'修复完成','ok'); setRunning(false); ws.close(); }
@@ -425,11 +534,93 @@ function runTask(mode){
 $('btn-translate').onclick = ()=> runTask('translate');
 $('btn-fix').onclick = ()=> runTask('fix');
 
+/* 继续未完成的工作：优先补齐缺失的译文；译文齐了再补做过一半的修复 */
+$('btn-resume').onclick = ()=>{
+  if(!cues.length){ toast('请先加载 SRT','err'); return; }
+  if(running) return;
+  const missTrans = cues.filter(c=> c.original.trim() && !c.translation.trim()).length;
+  const doneFix   = cues.filter(c=> c.fixed_text.trim()).length;
+  const missFix   = cues.length - doneFix;
+  if(missTrans){
+    toast(`发现 ${missTrans} 行未翻译，继续翻译…`,'info');
+    runTask('translate', true);
+  }else if(doneFix && missFix){
+    toast(`发现 ${missFix} 行未修复，继续修复…`,'info');
+    runTask('fix', true);
+  }else if(!doneFix){
+    toast('翻译已全部完成；如需润色请点「全部修复」','info',4000);
+  }else{
+    toast('所有行都已翻译并修复完成','ok');
+  }
+};
+
+/* ---------- transcribe (Demucs + Whisper) ---------- */
+function uploadMedia(f){
+  return new Promise((resolve, reject)=>{
+    const fd = new FormData(); fd.append('file', f);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST','/api/upload_media');
+    xhr.upload.onprogress = e=>{
+      if(e.lengthComputable){
+        const pct = e.loaded/e.total*100;
+        $('bar').style.width = pct+'%';
+        setStagePct(pct.toFixed(0)+'%');
+      }
+    };
+    xhr.onload = ()=> xhr.status===200 ? resolve() : reject(new Error('上传失败 HTTP '+xhr.status));
+    xhr.onerror = ()=> reject(new Error('媒体上传失败'));
+    xhr.send(fd);
+  });
+}
+
+async function transcribeFile(f){
+  if(!f || running) return;
+  setRunning(true);
+  $('bar').style.width='0%';
+  setStage(`正在上传 ${f.name}（${(f.size/1e6).toFixed(1)} MB）`);
+  try{
+    await uploadMedia(f);
+    cues = []; renderTable();
+    $('bar').style.width='0%';
+    setStage('准备转写…');
+    const proto = location.protocol==='https:'?'wss':'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/ws/transcribe`);
+    ws.onopen = ()=> ws.send(JSON.stringify({start:true}));
+    ws.onmessage = ev=>{
+      const m = JSON.parse(ev.data);
+      if(m.type==='stage') setStage(m.message);
+      else if(m.type==='asr_row') appendCue(m.cue);
+      else if(m.type==='progress'){
+        const pct = m.done/m.total*100;
+        $('bar').style.width = pct+'%';
+        setStagePct((m.label ? m.label+' ' : '') + pct.toFixed(0)+'%');
+      }
+      else if(m.type==='error'){ toast(m.message,'err',8000); setRunning(false); ws.close(); }
+      else if(m.type==='finished'){
+        setFileChip(m.filename||f.name, m.count);
+        toast(`转写完成，共 ${m.count} 行字幕`,'ok',5000);
+        setRunning(false); ws.close();
+      }
+    };
+    ws.onerror = ()=>{ toast('连接服务出错','err'); setRunning(false); };
+    ws.onclose = ()=>{ if(running) setRunning(false); };
+  }catch(err){
+    toast(err.message||'转写失败','err',6000); setRunning(false);
+  }
+}
+$('btn-transcribe').onclick = ()=> $('media-input').click();
+$('media-input').addEventListener('change', e=>{ transcribeFile(e.target.files[0]); e.target.value=''; });
+
 /* ---------- settings ---------- */
 $('btn-settings').onclick = async ()=>{
   const cfg = await (await fetch('/api/config')).json();
   $('set-api').value = cfg.api_key||''; $('set-url').value = cfg.base_url||'';
   $('set-model').value = cfg.model||'grok-4'; $('set-lang').value = cfg.target_lang||'中文';
+  $('set-conc').value = cfg.concurrency||10;
+  $('set-wmodel').value = cfg.whisper_model||'large-v3';
+  $('set-wdevice').value = cfg.whisper_device||'auto';
+  $('set-tlang').value = cfg.transcribe_lang ?? 'ja';
+  $('set-demucs').value = cfg.use_demucs===false ? '0' : '1';
   $('overlay').classList.add('show');
 };
 $('set-cancel').onclick = ()=> $('overlay').classList.remove('show');
@@ -437,7 +628,10 @@ $('overlay').addEventListener('click', e=>{ if(e.target===$('overlay')) $('overl
 $('set-save').onclick = async ()=>{
   await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
     api_key:$('set-api').value, base_url:$('set-url').value,
-    model:$('set-model').value, target_lang:$('set-lang').value
+    model:$('set-model').value, target_lang:$('set-lang').value,
+    concurrency:+$('set-conc').value||10,
+    whisper_model:$('set-wmodel').value, whisper_device:$('set-wdevice').value,
+    transcribe_lang:$('set-tlang').value, use_demucs:$('set-demucs').value==='1'
   })});
   $('overlay').classList.remove('show'); toast('配置已保存','ok');
 };

@@ -2,3 +2,9 @@ fastapi
 uvicorn[standard]
 openai
 python-multipart
+
+# ---- 本地转写流水线（视频 → Demucs 人声分离 → Faster-Whisper 转写） ----
+# 注意：RTX 50 系（Blackwell）显卡需要 CUDA 12.8 版 torch，先单独安装：
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+faster-whisper
+demucs
