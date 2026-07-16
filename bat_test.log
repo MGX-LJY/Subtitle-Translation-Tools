@@ -1,0 +1,15 @@
+Starting server... browser will open http://127.0.0.1:8000
+Close this window to stop the server.
+
+[2026-06-12 17:58:02,045] INFO - 启动网页服务: http://127.0.0.1:8000
+INFO:     Started server process [11564]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:4707 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4707 - "GET /api/cues HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4707 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:11941 - "GET / HTTP/1.1" 200 OK
+
+Server stopped.
+Press any key to continue . . . 
